@@ -26,7 +26,8 @@ if database_url and (database_url.startswith("mysql://") or database_url.startsw
     db_port = url.port or 3306
     db_user = url.username or "root"
     db_password = url.password or "1033721412Reddy#"
-    db_name = url.path.lstrip("/") if url.path else "my_control"
+    path_db = url.path.lstrip("/") if url.path else ""
+    db_name = path_db if path_db else os.environ.get("DB_NAME", "my_control")
 else:
     db_host = os.environ.get("DB_HOST", "localhost")
     db_port = int(os.environ.get("DB_PORT", 3306))

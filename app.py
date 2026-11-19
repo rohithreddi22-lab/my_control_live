@@ -42,77 +42,186 @@ def save_product_image(file_storage):
     return None
 
 
+_db_tables_initialized = False
+
+
+def ensure_database_exists():
+    """Ensure the target database exists on the MySQL server, creating it if needed."""
+    target_db = DB_CONFIG.get("database", "my_control")
+    server_config = {k: v for k, v in DB_CONFIG.items() if k != "database"}
+    try:
+        conn = mysql.connector.connect(**server_config)
+        cursor = conn.cursor()
+        cursor.execute(f"CREATE DATABASE IF NOT EXISTS `{target_db}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
+        conn.commit()
+        cursor.close()
+        conn.close()
+        print(f"Database '{target_db}' checked/created successfully.")
+        return True
+    except Exception as e:
+        print(f"Auto CREATE DATABASE '{target_db}' warning: {e}")
+        return False
+
+
+def init_tables(db):
+    """Ensure all required tables, columns, and initial demo accounts exist."""
+    cursor = db.cursor()
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      name VARCHAR(100) NOT NULL,
+      email VARCHAR(255) NOT NULL UNIQUE,
+      password_hash VARCHAR(255) NOT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS products (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      user_id INT NOT NULL,
+      name VARCHAR(150) NOT NULL,
+      category VARCHAR(50),
+      brand VARCHAR(100),
+      model_number VARCHAR(100),
+      purchase_date DATE,
+      purchase_price DECIMAL(10,2),
+      store VARCHAR(150),
+      notes TEXT,
+      image_path VARCHAR(255),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS warranties (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      product_id INT NOT NULL,
+      warranty_type VARCHAR(50),
+      start_date DATE,
+      expiry_date DATE NOT NULL,
+      provider VARCHAR(150),
+      document_path VARCHAR(255),
+      FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
+    )
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS maintenance (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      product_id INT NOT NULL,
+      task VARCHAR(200) NOT NULL,
+      last_done_date DATE,
+      next_due_date DATE,
+      service_provider VARCHAR(150),
+      cost DECIMAL(10,2),
+      notes TEXT,
+      FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
+    )
+    """)
+
+    # Check image_path column specifically
+    cursor.execute("SHOW COLUMNS FROM products LIKE 'image_path'")
+    if not cursor.fetchone():
+        cursor.execute("ALTER TABLE products ADD COLUMN image_path VARCHAR(255) NULL AFTER notes")
+
+    # If users table is empty, seed initial demo user so login works right away
+    try:
+        cursor.execute("SELECT COUNT(*) FROM users")
+        row = cursor.fetchone()
+        if row and row[0] == 0:
+            demo_pw = generate_password_hash("password123")
+            cursor.execute(
+                "INSERT INTO users (name, email, password_hash) VALUES (%s, %s, %s)",
+                ("Aarav Sharma", "aarav.sharma@example.com", demo_pw)
+            )
+            user_id = cursor.lastrowid
+            
+            cursor.execute("""
+            INSERT INTO products (user_id, name, category, brand, model_number, purchase_date, purchase_price, store, notes)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (
+                user_id,
+                "PlayStation 5 Pro",
+                "Gaming",
+                "Sony",
+                "CFI-7000",
+                "2024-11-07",
+                699.99,
+                "PlayStation Direct",
+                "2TB SSD version with enhanced GPU"
+            ))
+            prod_id = cursor.lastrowid
+            
+            cursor.execute("""
+            INSERT INTO warranties (product_id, warranty_type, start_date, expiry_date, provider)
+            VALUES (%s, %s, %s, %s, %s)
+            """, (
+                prod_id,
+                "Standard 1-Year",
+                "2024-11-07",
+                "2025-11-07",
+                "Sony PlayStation Support"
+            ))
+            print("Demo user (aarav.sharma@example.com / password123) and sample product seeded.")
+    except Exception as seed_err:
+        print(f"Demo seed notice: {seed_err}")
+
+    db.commit()
+    cursor.close()
+
+
 def get_db():
-    return mysql.connector.connect(**DB_CONFIG)
+    global _db_tables_initialized
+    try:
+        db = mysql.connector.connect(**DB_CONFIG)
+        if not _db_tables_initialized:
+            try:
+                init_tables(db)
+                _db_tables_initialized = True
+            except Exception as init_err:
+                print(f"init_tables warning: {init_err}")
+        return db
+    except mysql.connector.Error as err:
+        target_db = DB_CONFIG.get("database", "my_control")
+        # Error 1049 is ER_BAD_DB_ERROR: Unknown database
+        if getattr(err, "errno", None) == 1049 or "1049" in str(err):
+            if ensure_database_exists():
+                db = mysql.connector.connect(**DB_CONFIG)
+                init_tables(db)
+                _db_tables_initialized = True
+                return db
+            else:
+                # Inspect accessible databases on the server to give user clear guidance
+                try:
+                    server_config = {k: v for k, v in DB_CONFIG.items() if k != "database"}
+                    conn = mysql.connector.connect(**server_config)
+                    cursor = conn.cursor()
+                    cursor.execute("SHOW DATABASES")
+                    available_dbs = [
+                        r[0] for r in cursor.fetchall()
+                        if r[0] not in ("information_schema", "mysql", "performance_schema", "sys")
+                    ]
+                    cursor.close()
+                    conn.close()
+                    raise Exception(
+                        f"Database '{target_db}' does not exist on your MySQL server. "
+                        f"Accessible database(s) found: {available_dbs}. "
+                        f"Please set DB_NAME={available_dbs[0] if available_dbs else 'YOUR_DB'} in Render Environment Variables or run 'CREATE DATABASE {target_db};' on your MySQL cluster."
+                    ) from None
+                except Exception:
+                    raise err
+        raise err
 
 
 def init_db():
-    """Ensure all required tables and columns exist in the database."""
+    """Ensure database and all required tables exist on startup."""
+    global _db_tables_initialized
     try:
-        db = get_db()
-        cursor = db.cursor()
-        
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-          id INT AUTO_INCREMENT PRIMARY KEY,
-          name VARCHAR(100) NOT NULL,
-          email VARCHAR(255) NOT NULL UNIQUE,
-          password_hash VARCHAR(255) NOT NULL,
-          created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-        """)
-        
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS products (
-          id INT AUTO_INCREMENT PRIMARY KEY,
-          user_id INT NOT NULL,
-          name VARCHAR(150) NOT NULL,
-          category VARCHAR(50),
-          brand VARCHAR(100),
-          model_number VARCHAR(100),
-          purchase_date DATE,
-          purchase_price DECIMAL(10,2),
-          store VARCHAR(150),
-          notes TEXT,
-          image_path VARCHAR(255),
-          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-        )
-        """)
-        
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS warranties (
-          id INT AUTO_INCREMENT PRIMARY KEY,
-          product_id INT NOT NULL,
-          warranty_type VARCHAR(50),
-          start_date DATE,
-          expiry_date DATE NOT NULL,
-          provider VARCHAR(150),
-          document_path VARCHAR(255),
-          FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
-        )
-        """)
-        
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS maintenance (
-          id INT AUTO_INCREMENT PRIMARY KEY,
-          product_id INT NOT NULL,
-          task VARCHAR(200) NOT NULL,
-          last_done_date DATE,
-          next_due_date DATE,
-          service_provider VARCHAR(150),
-          cost DECIMAL(10,2),
-          notes TEXT,
-          FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
-        )
-        """)
-        
-        # Check image_path column specifically
-        cursor.execute("SHOW COLUMNS FROM products LIKE 'image_path'")
-        if not cursor.fetchone():
-            cursor.execute("ALTER TABLE products ADD COLUMN image_path VARCHAR(255) NULL AFTER notes")
-            
-        db.commit()
-        cursor.close()
+        ensure_database_exists()
+        db = mysql.connector.connect(**DB_CONFIG)
+        init_tables(db)
+        _db_tables_initialized = True
         db.close()
         print("Database initialized successfully.")
     except Exception as e:
